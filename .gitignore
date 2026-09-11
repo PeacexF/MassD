@@ -9,7 +9,6 @@ ehthumbs.db
 __pycache__/
 main
 server
-collector
 websocket
 venv/
 context/
@@ -36,3 +35,4 @@ dist-ssr
 *.sln
 *.sw?
 notes/
+bin/
