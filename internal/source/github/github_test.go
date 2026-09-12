@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/PeacexF/MassD/internal/fetch"
 	"github.com/PeacexF/MassD/internal/source"
 )
+
+var graphqlCalls atomic.Int32
 
 func testDB(t *testing.T) *db.DB {
 	t.Helper()
@@ -100,17 +103,53 @@ func apiServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 		json.NewEncoder(w).Encode(events)
 	})
 
-	mux.HandleFunc("/repos/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-RateLimit-Remaining", "4999")
-		json.NewEncoder(w).Encode(map[string]any{
-			"id": 1, "full_name": "owner/repo1", "stargazers_count": 1234,
-			"forks_count": 12, "subscribers_count": 3, "open_issues_count": 4,
-			"size": 900, "language": "Go", "default_branch": "main",
-			"topics": []string{"data", "sqlite"}, "archived": false,
-			"created_at": "2020-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-			"pushed_at": "2026-02-01T00:00:00Z",
-			"license":   map[string]any{"spdx_id": "MIT"},
-		})
+	mux.HandleFunc("/graphql", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			http.Error(w, "auth required", http.StatusUnauthorized)
+			return
+		}
+		var req struct {
+			Query     string `json:"query"`
+			Variables struct {
+				IDs []string `json:"ids"`
+			} `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		graphqlCalls.Add(1)
+
+		nodes := make([]map[string]any, 0, len(req.Variables.IDs))
+		for _, id := range req.Variables.IDs {
+			n, _ := strconv.ParseInt(strings.TrimPrefix(id, "N"), 10, 64)
+			node := map[string]any{
+				"databaseId": n, "nameWithOwner": fmt.Sprintf("owner/repo%d", n),
+				"stargazerCount": 1234, "forkCount": 12,
+				"watchers":         map[string]any{"totalCount": 3},
+				"issues":           map[string]any{"totalCount": 4},
+				"diskUsage":        900,
+				"primaryLanguage":  map[string]any{"name": "Go"},
+				"defaultBranchRef": map[string]any{"name": "main"},
+				"licenseInfo":      map[string]any{"spdxId": "MIT"},
+				"isArchived":       false,
+				"createdAt":        "2020-01-01T00:00:00Z",
+				"updatedAt":        "2026-01-01T00:00:00Z",
+				"pushedAt":         "2026-02-01T00:00:00Z",
+			}
+			if strings.Contains(req.Query, "repositoryTopics") {
+				node["repositoryTopics"] = map[string]any{"nodes": []any{
+					map[string]any{"topic": map[string]any{"name": "data"}},
+					map[string]any{"topic": map[string]any{"name": "sqlite"}},
+				}}
+			}
+			nodes = append(nodes, node)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+			"rateLimit": map[string]any{"cost": 1, "remaining": 4999, "limit": 5000,
+				"resetAt": "2026-02-02T12:00:00Z"},
+			"nodes": nodes,
+		}})
 	})
 	return srv, &eventHits
 }
@@ -184,13 +223,15 @@ func TestCollectEventsUsesETag(t *testing.T) {
 	}
 }
 
-func TestRepoDetailsWritesSnapshots(t *testing.T) {
+func TestRepoDetailsBatchesOverGraphQL(t *testing.T) {
 	srv, _ := apiServer(t)
 	d := testDB(t)
+	graphqlCalls.Store(0)
 
 	runSource(t, d, source.Config{"api_url": srv.URL, "datasets": []any{"repositories"}, "max_pages": 1})
 	res := runSource(t, d, source.Config{
-		"api_url": srv.URL, "datasets": []any{"repo_details"}, "detail_batch": 5,
+		"api_url": srv.URL, "graphql_url": srv.URL + "/graphql", "token": "test-token",
+		"datasets": []any{"repo_details"}, "detail_batch": 250, "topics": 5,
 	})
 	if res.Status != "completed" {
 		t.Fatalf("status = %s", res.Status)
@@ -198,14 +239,52 @@ func TestRepoDetailsWritesSnapshots(t *testing.T) {
 
 	var snapshots, stars int
 	d.QueryRow(`SELECT COUNT(*) FROM github_repository_snapshots`).Scan(&snapshots)
-	d.QueryRow(`SELECT stars FROM github_repository_snapshots LIMIT 1`).Scan(&stars)
-	if snapshots != 5 || stars != 1234 {
+	d.QueryRow(`SELECT stars FROM github_repository_snapshots WHERE repository_id=1`).Scan(&stars)
+	if snapshots != 100 || stars != 1234 {
 		t.Fatalf("snapshots=%d stars=%d", snapshots, stars)
 	}
+	// 100 repositories must cost one query, not one query per repository.
+	if n := graphqlCalls.Load(); n != 1 {
+		t.Fatalf("graphql calls = %d, want 1 for 100 repositories", n)
+	}
 
-	var topics, license string
-	d.QueryRow(`SELECT topics, license FROM github_repository_snapshots LIMIT 1`).Scan(&topics, &license)
-	if topics != "data,sqlite" || license != "MIT" {
-		t.Fatalf("topics=%q license=%q", topics, license)
+	var topics, license, branch string
+	d.QueryRow(`SELECT topics, license, default_branch FROM github_repository_snapshots LIMIT 1`).Scan(&topics, &license, &branch)
+	if topics != "data,sqlite" || license != "MIT" || branch != "main" {
+		t.Fatalf("topics=%q license=%q branch=%q", topics, license, branch)
+	}
+
+	// Repositories snapshotted this run are not re-fetched by the next one.
+	graphqlCalls.Store(0)
+	again := runSource(t, d, source.Config{
+		"api_url": srv.URL, "graphql_url": srv.URL + "/graphql", "token": "test-token",
+		"datasets": []any{"repo_details"}, "detail_batch": 250, "refresh_after": "168h",
+	})
+	if again.Stats.Inserted != 0 || graphqlCalls.Load() != 0 {
+		t.Fatalf("fresh snapshots were refetched: inserted=%d calls=%d", again.Stats.Inserted, graphqlCalls.Load())
+	}
+}
+
+func TestRepoDetailsRequiresToken(t *testing.T) {
+	srv, _ := apiServer(t)
+	d := testDB(t)
+
+	runSource(t, d, source.Config{"api_url": srv.URL, "datasets": []any{"repositories"}, "max_pages": 1})
+	res := runSource(t, d, source.Config{
+		"api_url": srv.URL, "graphql_url": srv.URL + "/graphql",
+		"datasets": []any{"repo_details"},
+	})
+	var n int
+	d.QueryRow(`SELECT COUNT(*) FROM _errors WHERE run_id=? AND error LIKE '%token%'`, res.RunID).Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected a recorded token error, got %d", n)
+	}
+}
+
+func TestChunkTargets(t *testing.T) {
+	targets := make([]detailTarget, 250)
+	chunks := chunkTargets(targets, nodesPerQuery)
+	if len(chunks) != 3 || len(chunks[0]) != 100 || len(chunks[2]) != 50 {
+		t.Fatalf("chunks = %d sizes %d/%d", len(chunks), len(chunks[0]), len(chunks[len(chunks)-1]))
 	}
 }

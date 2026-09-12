@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PeacexF/MassD/internal/db"
@@ -70,8 +72,15 @@ func (s *Source) Collect(ctx context.Context, env *source.Environment) error {
 		return err
 	}
 
-	c := &collector{env: env, client: client, api: api, st: &st,
-		maxWait: env.Config.Duration("rate_limit_max_wait", 15*time.Minute)}
+	c := &collector{
+		env:        env,
+		client:     client,
+		api:        api,
+		graphqlURL: env.Config.String("graphql_url", strings.TrimSuffix(api, "/api/v3")+"/graphql"),
+		token:      token,
+		st:         &st,
+		maxWait:    env.Config.Duration("rate_limit_max_wait", 15*time.Minute),
+	}
 
 	for _, ds := range datasets {
 		if ctx.Err() != nil {
@@ -102,11 +111,13 @@ func (s *Source) Collect(ctx context.Context, env *source.Environment) error {
 }
 
 type collector struct {
-	env     *source.Environment
-	client  *fetch.Client
-	api     string
-	st      *state
-	maxWait time.Duration
+	env        *source.Environment
+	client     *fetch.Client
+	api        string
+	graphqlURL string
+	token      string
+	st         *state
+	maxWait    time.Duration
 }
 
 // get decodes a JSON response and returns the response so callers can read
@@ -336,110 +347,201 @@ func (c *collector) events(ctx context.Context) error {
 	return nil
 }
 
-type repoDetail struct {
-	repo
-	Stargazers    int      `json:"stargazers_count"`
-	Forks         int      `json:"forks_count"`
-	Watchers      int      `json:"subscribers_count"`
-	OpenIssues    int      `json:"open_issues_count"`
-	Size          int      `json:"size"`
-	Language      string   `json:"language"`
-	DefaultBranch string   `json:"default_branch"`
-	Topics        []string `json:"topics"`
-	Archived      bool     `json:"archived"`
-	CreatedAt     string   `json:"created_at"`
-	UpdatedAt     string   `json:"updated_at"`
-	PushedAt      string   `json:"pushed_at"`
-	License       struct {
-		SPDX string `json:"spdx_id"`
-	} `json:"license"`
+type detailTarget struct {
+	id     int64
+	nodeID string
 }
 
 // repoDetails turns previously enumerated repositories into point-in-time
-// snapshots, one request per repository.
+// snapshots. One GraphQL query covers 100 repositories for roughly the cost of
+// a single REST call, so this is the difference between thousands and hundreds
+// of thousands of snapshots per hour.
 func (c *collector) repoDetails(ctx context.Context) error {
 	env := c.env
-	limit := env.Config.Int("detail_batch", 200)
+	if c.token == "" {
+		return errors.New("repo_details needs a token: the GraphQL API rejects anonymous requests")
+	}
 
-	rows, err := env.DB.QueryContext(ctx,
-		`SELECT id, full_name FROM github_repositories WHERE id > ? ORDER BY id LIMIT ?`,
-		c.st.DetailsCursor, limit)
+	batchSize := env.Config.Int("detail_batch", 1000)
+	topics := env.Config.Int("topics", 0)
+	refresh := env.Config.Duration("refresh_after", 7*24*time.Hour)
+	workers := min(max(env.Config.Int("detail_workers", env.Opts.Workers), 1), 16)
+
+	targets, err := c.detailTargets(ctx, batchSize, refresh)
 	if err != nil {
 		return err
 	}
-	type target struct {
-		id       int64
-		fullName string
-	}
-	var targets []target
-	for rows.Next() {
-		var t target
-		if err := rows.Scan(&t.id, &t.fullName); err != nil {
-			rows.Close()
-			return err
-		}
-		targets = append(targets, t)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
 	if len(targets) == 0 {
-		// Wrap around so repeated runs keep refreshing existing repositories.
+		// Nothing left in this pass; restart the sweep so snapshots keep
+		// accumulating over time.
 		c.st.DetailsCursor = 0
 		return env.SaveState(ctx, c.st)
 	}
 
-	for _, t := range targets {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	chunks := chunkTargets(targets, nodesPerQuery)
+	query := repoQuery(topics)
+	results := make([][]gqlRepo, len(chunks))
+	failures := make([]error, len(chunks))
+
+	var (
+		next    atomic.Int64
+		limitMu sync.Mutex
+		limit   rateLimit
+		wg      sync.WaitGroup
+	)
+	for range min(workers, len(chunks)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(chunks) || ctx.Err() != nil {
+					return
+				}
+
+				ids := make([]string, len(chunks[i]))
+				for j, t := range chunks[i] {
+					ids[j] = t.nodeID
+				}
+
+				var data struct {
+					RateLimit rateLimit `json:"rateLimit"`
+					Nodes     []gqlRepo `json:"nodes"`
+				}
+				gqlErrs, err := c.graphql(ctx, query, map[string]any{"ids": ids}, &data)
+				for _, ge := range gqlErrs {
+					env.Log.Debug("graphql node error", "error", ge.String())
+				}
+				if err != nil {
+					failures[i] = err
+					return
+				}
+				results[i] = data.Nodes
+
+				limitMu.Lock()
+				limit = data.RateLimit
+				limitMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	now := db.Now()
+	advanceTo := int64(0)
+	contiguous := true
+	for i, chunk := range chunks {
+		if failures[i] != nil {
+			if contiguous {
+				contiguous = false
+			}
+			env.Error(ctx, failures[i], "repo details graphql")
+			continue
 		}
 
-		var d repoDetail
-		resp, err := c.get(ctx, c.api+"/repos/"+t.fullName, nil, &d)
-		if err != nil {
-			var httpErr *fetch.HTTPError
-			if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusForbidden) {
-				c.st.DetailsCursor = t.id
-				env.Error(ctx, err, "repo details "+t.fullName)
+		batch := make([]record.Record, 0, len(results[i]))
+		for j, node := range results[i] {
+			id := node.DatabaseID
+			if id == 0 && j < len(chunk) {
+				id = chunk[j].id
+			}
+			if id == 0 || node.NameWithOwner == "" {
 				continue
 			}
+			batch = append(batch, snapshotRecord(id, node, now, env.RunID))
+		}
+		if err := env.Emit(ctx, batch...); err != nil {
 			return err
 		}
+		if contiguous {
+			advanceTo = chunk[len(chunk)-1].id
+		}
+	}
 
-		now := db.Now()
-		rec := record.New("github_repository_snapshots").
-			Set("repository_id", t.id).
-			Set("observed_at", now).
-			Set("stars", d.Stargazers).
-			Set("forks", d.Forks).
-			Set("watchers", d.Watchers).
-			Set("open_issues", d.OpenIssues).
-			Set("size_kb", d.Size).
-			Set("language", null(d.Language)).
-			Set("default_branch", null(d.DefaultBranch)).
-			Set("topics", null(strings.Join(d.Topics, ","))).
-			Set("license", null(d.License.SPDX)).
-			Set("archived", boolInt(d.Archived)).
-			Set("created_at", null(d.CreatedAt)).
-			Set("updated_at", null(d.UpdatedAt)).
-			Set("pushed_at", null(d.PushedAt)).
-			Set("run_id", env.RunID).
-			OnConflict(record.Ignore)
+	if advanceTo > c.st.DetailsCursor {
+		c.st.DetailsCursor = advanceTo
+	}
+	if err := env.SaveState(ctx, c.st); err != nil {
+		return err
+	}
 
-		if err := env.Emit(ctx, rec); err != nil {
-			return err
-		}
-		c.st.DetailsCursor = t.id
-		if err := env.SaveState(ctx, c.st); err != nil {
-			return err
-		}
-		if err := c.respectRateLimit(ctx, resp.Header); err != nil {
-			return err
+	limitMu.Lock()
+	defer limitMu.Unlock()
+	if limit.Limit > 0 {
+		env.Log.Info("graphql quota", "cost", limit.Cost, "remaining", limit.Remaining,
+			"limit", limit.Limit, "resets", limit.ResetAt.Format(time.RFC3339))
+		if limit.Remaining == 0 {
+			return fmt.Errorf("graphql quota exhausted until %s", limit.ResetAt.Format(time.RFC3339))
 		}
 	}
 	return nil
+}
+
+// detailTargets walks repositories by id and skips any that already have a
+// recent snapshot. The EXISTS clause is an index seek, not a scan.
+func (c *collector) detailTargets(ctx context.Context, limit int, refresh time.Duration) ([]detailTarget, error) {
+	query := `SELECT id, node_id FROM github_repositories
+	          WHERE id > ? AND node_id IS NOT NULL AND node_id != ''
+	          ORDER BY id LIMIT ?`
+	args := []any{c.st.DetailsCursor, limit}
+
+	if refresh > 0 {
+		query = `SELECT id, node_id FROM github_repositories r
+		         WHERE r.id > ? AND r.node_id IS NOT NULL AND r.node_id != ''
+		           AND NOT EXISTS (
+		             SELECT 1 FROM github_repository_snapshots s
+		             WHERE s.repository_id = r.id AND s.observed_at > ?)
+		         ORDER BY r.id LIMIT ?`
+		cutoff := time.Now().UTC().Add(-refresh).Format(time.RFC3339Nano)
+		args = []any{c.st.DetailsCursor, cutoff, limit}
+	}
+
+	rows, err := c.env.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []detailTarget
+	for rows.Next() {
+		var t detailTarget
+		if err := rows.Scan(&t.id, &t.nodeID); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func chunkTargets(targets []detailTarget, size int) [][]detailTarget {
+	var out [][]detailTarget
+	for start := 0; start < len(targets); start += size {
+		out = append(out, targets[start:min(start+size, len(targets))])
+	}
+	return out
+}
+
+func snapshotRecord(id int64, node gqlRepo, now string, runID int64) record.Record {
+	return record.New("github_repository_snapshots").
+		Set("repository_id", id).
+		Set("observed_at", now).
+		Set("stars", node.Stars).
+		Set("forks", node.Forks).
+		Set("watchers", node.Watchers.TotalCount).
+		Set("open_issues", node.Issues.TotalCount).
+		Set("size_kb", node.diskUsage()).
+		Set("language", null(node.language())).
+		Set("default_branch", null(node.branch())).
+		Set("topics", null(node.topics())).
+		Set("license", null(node.license())).
+		Set("archived", boolInt(node.IsArchived)).
+		Set("created_at", null(node.CreatedAt)).
+		Set("updated_at", null(node.UpdatedAt)).
+		Set("pushed_at", null(node.PushedAt)).
+		Set("run_id", runID).
+		OnConflict(record.Ignore)
 }
 
 func null(s string) any {
