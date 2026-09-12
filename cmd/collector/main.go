@@ -21,6 +21,7 @@ import (
 	"github.com/PeacexF/MassD/internal/source"
 	"github.com/PeacexF/MassD/internal/stats"
 
+	_ "github.com/PeacexF/MassD/internal/source/commoncrawl"
 	_ "github.com/PeacexF/MassD/internal/source/gdelt"
 	_ "github.com/PeacexF/MassD/internal/source/github"
 	_ "github.com/PeacexF/MassD/internal/source/rss"
