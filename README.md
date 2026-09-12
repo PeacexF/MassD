@@ -38,6 +38,7 @@ python3 scripts/export.py data/massive.db --table rss_items --output items.jsonl
 | `rss` | feed items | RSS, Atom and RDF; conditional GETs make re-runs nearly free |
 | `gdelt` | events, mentions | GDELT 2.0 publishes new files every 15 minutes |
 | `github` | repositories, events, snapshots | REST for enumeration and events, GraphQL for snapshots |
+| `commoncrawl` | index captures, pages | CDX shards streamed; documents fetched from WARC by byte range |
 | `test` | synthetic | no network; used to verify the pipeline |
 
 ### GitHub and the two APIs
@@ -54,6 +55,18 @@ token with no scopes is enough for public data:
 ```bash
 export GITHUB_TOKEN=...
 ```
+
+### Common Crawl
+
+Common Crawl is treated as a data source, not a crawl target. The `index`
+dataset streams the published CDX shards — billions of captures per crawl, at
+almost no parsing cost — and `pages` retrieves individual documents with ranged
+requests against WARC files, extracting title, description, language, canonical
+URL, link count and optionally text.
+
+Measured on a real shard: **492,034 index rows at 12,568 rows/sec**, 43.6 MB
+downloaded, 327 MB on disk. A whole crawl is a multi-terabyte decision, so runs
+are bounded by `max_shards` and `--max-records` by default.
 
 ## Configuration
 

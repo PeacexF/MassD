@@ -30,6 +30,8 @@
 | `internal/record` | the record type and INSERT generation |
 | `internal/fetch` | retries, backoff, rate limiting, size limits, byte accounting |
 | `internal/config` | optional YAML configuration |
+| `internal/warc` | WARC 1.x record reading |
+| `internal/htmlx` | title, description, language, canonical, links and text from HTML |
 | `internal/stats` | run counters and the throughput report |
 
 ## The source contract

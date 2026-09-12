@@ -56,3 +56,20 @@ sources:
 
   commoncrawl:
     enabled: false
+    # A crawl id such as CC-MAIN-2026-34, or "latest" to use the newest one.
+    crawl: latest
+    # index - stream CDX shards (billions of rows per crawl, cheap to parse)
+    # pages - fetch documents from WARC by ranged request (one request each)
+    datasets: [index]
+    # A crawl has 300 shards of roughly 1 GB each. Keep runs bounded.
+    max_shards: 1
+    shard_count: 300
+    checkpoint_lines: 50000
+    # pages settings
+    page_batch: 500
+    page_workers: 8
+    page_mime: text/html
+    collect_links: true
+    # Storing extracted text multiplies storage; length is always recorded.
+    store_text: false
+    text_limit: 4096

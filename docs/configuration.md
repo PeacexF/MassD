@@ -97,6 +97,55 @@ Unauthenticated REST is 60 requests/hour, authenticated is 5,000.
 requests: 100 repositories per query costs about one point, so a token is worth
 roughly a hundredfold more snapshots per hour.
 
+### commoncrawl
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `crawl` | `latest` | crawl id such as `CC-MAIN-2026-34`, or the newest published one |
+| `datasets` | `[index]` | also `pages` |
+| `max_shards` | `1` | CDX shards per run |
+| `shard_count` | `300` | shards in a crawl |
+| `checkpoint_lines` | `50000` | lines between resume checkpoints |
+| `page_batch` | `500` | index rows fetched from WARC per run |
+| `page_workers` | global | concurrent ranged requests |
+| `page_mime` | `text/html` | MIME prefix filter for `pages`; empty means any |
+| `collect_links` | `true` | count and resolve links while extracting |
+| `store_text` | `false` | keep extracted text (`text_length` is always stored) |
+| `text_limit` | `4096` | bytes of text retained when `store_text` is on |
+| `data_url` | `https://data.commoncrawl.org` | bulk data host |
+| `index_url` | `https://index.commoncrawl.org` | crawl listing host |
+
+The `index` dataset streams gzipped CDX shards and never holds one in memory.
+Progress is a shard number plus a line offset, so an interrupted shard resumes
+where it stopped; resuming re-reads the shard's earlier lines, which costs
+bandwidth but cannot duplicate rows or skip them.
+
+`pages` works from index rows already in the database, fetching each document
+with a `Range` request against its WARC file. It skips rows that already have a
+page, so it can be run repeatedly to work through the index.
+
+Switching `crawl` resets shard progress; the `pages` cursor is independent.
+
+### Storage cost
+
+Measured on a real shard of `CC-MAIN-2026-34`:
+
+| | |
+| --- | --- |
+| rows | 492,034 |
+| database | 327 MB (about 665 bytes per row) |
+| table | 201 MB |
+| indexes | 126 MB (39%) |
+
+A full crawl holds billions of captures, so ingesting one whole is a multi
+terabyte decision. Start with a bounded partition, measure, then scale. If an
+index is not worth its size for your queries, drop it:
+
+```sql
+DROP INDEX idx_cc_index_digest;   -- content-duplicate lookups
+DROP INDEX idx_cc_index_status;   -- status/mime filtering
+```
+
 ## Secrets
 
 Keep tokens in the environment and reference them as `${VAR}`. `config.yaml` is

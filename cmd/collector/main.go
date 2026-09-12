@@ -187,6 +187,11 @@ func cmdSources(cfg *config.Config) error {
 		}
 		fmt.Printf("%-14s %-9s %s\n", s.Name(), state, source.Describe(s))
 	}
+	if cfg.LoadedFrom() == "" {
+		fmt.Printf("\nNo config file loaded, so nothing is enabled for `run all`.\n"+
+			"Copy config/config.example.yaml to config/config.yaml, or name a source: collector run %s\n",
+			names[0])
+	}
 	return nil
 }
 
