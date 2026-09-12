@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: 0
+        run: go build ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  smoke:
+    name: Collector smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build collector
+        env:
+          CGO_ENABLED: 0
+        run: go build -o bin/collector ./cmd/collector
+
+      # The synthetic source exercises migrations, batching, dedup and resume
+      # without touching the network.
+      - name: Collect, resume and verify
+        run: |
+          set -euo pipefail
+          ./bin/collector init --db /tmp/smoke.db
+          ./bin/collector run test --db /tmp/smoke.db --batch-size 5000
+          ./bin/collector run test --db /tmp/smoke.db
+          ./bin/collector status --db /tmp/smoke.db
+          rows=$(sqlite3 /tmp/smoke.db 'SELECT COUNT(*) FROM test_records;')
+          echo "collected rows: $rows"
+          test "$rows" -eq 200000
+          test "$(sqlite3 /tmp/smoke.db 'PRAGMA integrity_check;')" = "ok"
+
+      - name: Export to JSONL
+        run: |
+          set -euo pipefail
+          python3 scripts/export.py /tmp/smoke.db --table test_records --limit 1000 --output /tmp/out.jsonl
+          test "$(wc -l < /tmp/out.jsonl)" -eq 1000
+          head -1 /tmp/out.jsonl
+
+  python:
+    name: Exporter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check --quiet pytest
+
+      - name: Test
+        run: pytest scripts -q
