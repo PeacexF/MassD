@@ -1,0 +1,35 @@
+# One feed URL per line. Lines starting with # are ignored.
+
+# Technology
+https://news.ycombinator.com/rss
+https://lobste.rs/rss
+https://feeds.arstechnica.com/arstechnica/index
+https://www.theverge.com/rss/index.xml
+https://techcrunch.com/feed/
+https://www.wired.com/feed/rss
+https://hnrss.org/frontpage
+
+# Software and releases
+https://blog.golang.org/feed.atom
+https://github.blog/feed/
+https://www.python.org/jobs/feed/rss/
+https://blog.rust-lang.org/feed.xml
+https://sqlite.org/news.rss
+
+# Science and research
+https://phys.org/rss-feed/
+https://www.nature.com/nature.rss
+https://export.arxiv.org/rss/cs
+https://export.arxiv.org/rss/stat.ML
+
+# World news
+https://feeds.bbci.co.uk/news/world/rss.xml
+https://rss.nytimes.com/services/xml/rss/nyt/World.xml
+https://www.aljazeera.com/xml/rss/all.xml
+https://feeds.npr.org/1001/rss.xml
+https://www.theguardian.com/world/rss
+
+# Security
+https://krebsonsecurity.com/feed/
+https://www.schneier.com/feed/atom/
+https://feeds.feedburner.com/TheHackersNews

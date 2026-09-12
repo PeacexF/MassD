@@ -166,6 +166,9 @@ func TestRunRecordsErrorsWithoutFailing(t *testing.T) {
 	if res.Status != "completed" {
 		t.Fatalf("status = %s", res.Status)
 	}
+	if res.Stats.Errors != 1 {
+		t.Fatalf("stats errors = %d, want 1", res.Stats.Errors)
+	}
 
 	var n int
 	var msg string

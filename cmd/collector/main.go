@@ -21,6 +21,9 @@ import (
 	"github.com/PeacexF/MassD/internal/source"
 	"github.com/PeacexF/MassD/internal/stats"
 
+	_ "github.com/PeacexF/MassD/internal/source/gdelt"
+	_ "github.com/PeacexF/MassD/internal/source/github"
+	_ "github.com/PeacexF/MassD/internal/source/rss"
 	_ "github.com/PeacexF/MassD/internal/source/testsrc"
 )
 
@@ -290,6 +293,7 @@ func cmdRun(ctx context.Context, cfg *config.Config, o *options, args []string, 
 			HTTP:   httpClient,
 			Config: source.Config(cfg.Source(s.Name())),
 			Log:    log.With("source", s.Name()),
+			Stats:  st,
 		})
 
 		fmt.Println()

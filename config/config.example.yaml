@@ -1,0 +1,49 @@
+# Copy to config/config.yaml and edit. Every value here is optional; the
+# collector runs with sensible defaults when no config file exists.
+
+database: ./data/massive.db
+
+workers: 8
+batch_size: 10000
+timeout: 60s
+max_retries: 4
+# Global requests/second ceiling. 0 means unlimited; sources can be stricter.
+rate_limit: 0
+
+sqlite:
+  cache_size_kb: 65536
+  mmap_size_mb: 256
+  busy_timeout: 30s
+  max_conns: 4
+
+sources:
+  test:
+    enabled: false
+    count: 100000
+
+  rss:
+    enabled: true
+    feeds_file: ./config/feeds.txt
+    workers: 16
+    max_feed_bytes: 33554432
+
+  gdelt:
+    enabled: true
+    # latest   - the newest 15-minute files
+    # backfill - walk the master file list from --since forward
+    mode: latest
+    datasets: [export, mentions]
+    max_files: 0
+
+  github:
+    enabled: true
+    # Secrets never belong in this file.
+    token: ${GITHUB_TOKEN}
+    datasets: [repositories, events]
+    # Pages of 100 repositories per run; 0 keeps going until the API runs out.
+    max_pages: 20
+    event_pages: 3
+    store_payload: true
+
+  commoncrawl:
+    enabled: false

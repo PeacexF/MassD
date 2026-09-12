@@ -175,3 +175,17 @@ func TestConcurrencySlotsAreReleased(t *testing.T) {
 		resp.Body.Close()
 	}
 }
+
+func TestParseLinks(t *testing.T) {
+	h := `<https://api.github.com/repositories?since=369>; rel="next", <https://api.github.com/repositories{?since}>; rel="first"`
+	links := ParseLinks(h)
+	if links["next"] != "https://api.github.com/repositories?since=369" {
+		t.Fatalf("next = %q", links["next"])
+	}
+	if len(ParseLinks("")) != 0 {
+		t.Fatal("empty header should yield no links")
+	}
+	if len(ParseLinks("garbage")) != 0 {
+		t.Fatal("malformed header should yield no links")
+	}
+}

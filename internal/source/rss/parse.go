@@ -95,8 +95,9 @@ type rawItem struct {
 func Parse(r io.Reader) (*Feed, error) {
 	dec := xml.NewDecoder(r)
 	// Real-world feeds are frequently malformed and full of HTML entities.
+	// HTMLAutoClose is deliberately not set: it treats <link> as a void element
+	// and swallows the rest of an RSS channel.
 	dec.Strict = false
-	dec.AutoClose = xml.HTMLAutoClose
 	dec.Entity = xml.HTMLEntity
 	dec.CharsetReader = charsetReader
 

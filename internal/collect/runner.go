@@ -21,9 +21,12 @@ import (
 
 type Options struct {
 	source.Options
-	HTTP      *fetch.Client
-	Config    source.Config
-	Log       *slog.Logger
+	HTTP   *fetch.Client
+	Config source.Config
+	Log    *slog.Logger
+	// Stats is shared with the HTTP client so requests and bytes land in the
+	// same report as records. Run creates one when it is nil.
+	Stats     *stats.Stats
 	QueueSize int
 	// FlushInterval bounds how long finished work sits unflushed when a source
 	// produces records slowly.
@@ -48,7 +51,10 @@ func Run(ctx context.Context, d *db.DB, src source.Source, opts Options) (Result
 		opts.FlushInterval = 30 * time.Second
 	}
 
-	st := stats.New()
+	st := opts.Stats
+	if st == nil {
+		st = stats.New()
+	}
 	runID, err := startRun(ctx, d, name)
 	if err != nil {
 		return Result{}, err
@@ -205,6 +211,9 @@ func (p *pipeline) Emit(ctx context.Context, recs ...record.Record) error {
 			return err
 		}
 		p.st.Fetched.Add(countData(recs))
+		if n := countTable(recs, "_errors"); n > 0 {
+			p.st.Errors.Add(n)
+		}
 	}
 	if limited {
 		return source.ErrLimit
@@ -242,6 +251,16 @@ func countData(recs []record.Record) int64 {
 	var n int64
 	for _, r := range recs {
 		if !strings.HasPrefix(r.Table, "_") {
+			n++
+		}
+	}
+	return n
+}
+
+func countTable(recs []record.Record, table string) int64 {
+	var n int64
+	for _, r := range recs {
+		if r.Table == table {
 			n++
 		}
 	}

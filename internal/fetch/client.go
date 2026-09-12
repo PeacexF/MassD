@@ -120,6 +120,7 @@ type HTTPError struct {
 	Status     string
 	URL        string
 	Snippet    string
+	Header     http.Header
 }
 
 func (e *HTTPError) Error() string {
@@ -184,7 +185,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			drain(resp)
 			cancel()
 			c.release()
-			httpErr := &HTTPError{StatusCode: resp.StatusCode, Status: resp.Status, URL: req.URL.Redacted()}
+			httpErr := &HTTPError{StatusCode: resp.StatusCode, Status: resp.Status, URL: req.URL.Redacted(), Header: resp.Header}
 			if !replayable || attempt >= c.opts.MaxRetries {
 				return nil, httpErr
 			}
@@ -198,7 +199,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			snippet := readSnippet(resp)
 			cancel()
 			c.release()
-			return nil, &HTTPError{StatusCode: resp.StatusCode, Status: resp.Status, URL: req.URL.Redacted(), Snippet: snippet}
+			return nil, &HTTPError{StatusCode: resp.StatusCode, Status: resp.Status, URL: req.URL.Redacted(), Snippet: snippet, Header: resp.Header}
 		default:
 			resp.Body = &trackedBody{
 				rc:     resp.Body,
