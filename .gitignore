@@ -38,3 +38,4 @@ notes/
 bin/
 data/*
 !.gitkeep
+config.yaml

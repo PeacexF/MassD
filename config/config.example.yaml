@@ -39,11 +39,20 @@ sources:
     enabled: true
     # Secrets never belong in this file.
     token: ${GITHUB_TOKEN}
+    # repositories - enumerate every public repository (REST, resumable by id)
+    # events       - the public event stream (REST, ETag conditional)
+    # repo_details - star/fork/language snapshots (GraphQL, needs a token)
     datasets: [repositories, events]
     # Pages of 100 repositories per run; 0 keeps going until the API runs out.
     max_pages: 20
     event_pages: 3
     store_payload: true
+    # repo_details: repositories per run, and how long a snapshot stays fresh.
+    detail_batch: 1000
+    detail_workers: 4
+    refresh_after: 168h
+    # Topics cost one extra GraphQL point per topic per 100 repositories.
+    topics: 0
 
   commoncrawl:
     enabled: false
